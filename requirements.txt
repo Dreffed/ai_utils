@@ -1,0 +1,2 @@
+# Code Output Analyzer Dependencies
+pyperclip>=1.8.
