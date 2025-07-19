@@ -1,5 +1,6 @@
 """
 Main CodeAnalyzer class for extracting and analyzing code blocks.
+Fixed version with proper nested code block handling.
 """
 
 import os
@@ -29,14 +30,14 @@ class CodeAnalyzer:
         lines = normalized_content.split('\n')
 
         header_pattern = re.compile(r'^## (.+)')
-        code_block_start = re.compile(r'^```(.*)$')
-        code_block_end = re.compile(r'^```\s*$')
+        code_block_pattern = re.compile(r'^```(.*)$')
 
         print("🔍 DEBUG: State Machine Extraction")
         print("-" * 50)
 
         state = "LOOKING_FOR_HEADER"
         current_filename = None
+        nesting_level = 0
 
         for i, line in enumerate(lines):
             line_num = i + 1
@@ -44,30 +45,44 @@ class CodeAnalyzer:
             # Show state changes and important lines
             if state == "LOOKING_FOR_HEADER":
                 header_match = header_pattern.match(line)
-                code_start_match = code_block_start.match(line)
+                code_match = code_block_pattern.match(line)
 
                 if header_match:
                     current_filename = header_match.group(1).strip()
                     print(f"Line {line_num:3d}: {line}")
                     print(f"         -> STATE: Found header '{current_filename}'")
-                elif current_filename and code_start_match and not code_block_end.match(line):
+                elif current_filename and code_match:
                     state = "IN_CODE_BLOCK"
-                    lang = code_start_match.group(1).strip() if code_start_match.group(1) else 'text'
+                    nesting_level = 1
+                    lang = code_match.group(1).strip() if code_match.group(1) else 'text'
                     print(f"Line {line_num:3d}: {line}")
-                    print(f"         -> STATE: Entering code block (language: {lang})")
+                    print(f"         -> STATE: Entering code block (language: {lang}, nesting: {nesting_level})")
                 elif verbose:
                     print(f"Line {line_num:3d}: {line}")
 
             elif state == "IN_CODE_BLOCK":
-                if code_block_end.match(line):
-                    state = "LOOKING_FOR_HEADER"
+                code_match = code_block_pattern.match(line)
+                if code_match:
+                    # This is a ``` line - could be start or end of nested block
+                    lang_or_empty = code_match.group(1).strip()
+
+                    if lang_or_empty:
+                        # This starts a new nested block
+                        nesting_level += 1
+                        print(f"Line {line_num:3d}: {line}")
+                        print(f"         -> NESTING: Entering nested block (level: {nesting_level})")
+                    else:
+                        # This ends a block
+                        nesting_level -= 1
+                        print(f"Line {line_num:3d}: {line}")
+                        print(f"         -> NESTING: Exiting block (level: {nesting_level})")
+
+                        if nesting_level == 0:
+                            state = "LOOKING_FOR_HEADER"
+                            print(f"         -> STATE: Exiting main code block, processing '{current_filename}'")
+                            current_filename = None
+                elif verbose:
                     print(f"Line {line_num:3d}: {line}")
-                    print(f"         -> STATE: Exiting code block, processing '{current_filename}'")
-                    current_filename = None
-                elif verbose or line.strip().startswith('"""'):
-                    print(f"Line {line_num:3d}: {line}")
-                    if line.strip().startswith('"""'):
-                        print(f"         -> CONTENT: Triple quote (correctly ignored)")
 
         print("-" * 50)
 
@@ -89,19 +104,19 @@ class CodeAnalyzer:
         # self._extract_inline_style_blocks(normalized_content)
 
     def _extract_header_style_blocks(self, content: str) -> None:
-        """Extract code blocks that follow markdown headers using state machine approach."""
+        """Extract code blocks that follow markdown headers using state machine approach with nesting support."""
         lines = content.split('\n')
 
         # Regex patterns
         header_pattern = re.compile(r'^## (.+)')
-        code_block_start = re.compile(r'^```(.*)$')
-        code_block_end = re.compile(r'^```\s*$')
+        code_block_pattern = re.compile(r'^```(.*)$')
 
         # State machine variables
         state = "LOOKING_FOR_HEADER"  # States: LOOKING_FOR_HEADER, IN_CODE_BLOCK
         current_filename = None
         current_language = None
         current_content_lines = []
+        nesting_level = 0
 
         for i, line in enumerate(lines):
             if state == "LOOKING_FOR_HEADER":
@@ -114,10 +129,10 @@ class CodeAnalyzer:
 
                 # Check for code block start (only if we have a filename)
                 if current_filename:
-                    code_start_match = code_block_start.match(line)
-                    if code_start_match and not code_block_end.match(line):
-                        # Extract language
-                        lang_and_extra = code_start_match.group(1).strip() if code_start_match.group(1) else ''
+                    code_match = code_block_pattern.match(line)
+                    if code_match:
+                        # Extract language from the opening line
+                        lang_and_extra = code_match.group(1).strip() if code_match.group(1) else ''
                         if lang_and_extra:
                             current_language = lang_and_extra.split()[0]
                         else:
@@ -126,41 +141,60 @@ class CodeAnalyzer:
                         # Change to code block state
                         state = "IN_CODE_BLOCK"
                         current_content_lines = []
+                        nesting_level = 1  # We're now inside the main code block
                         continue
 
             elif state == "IN_CODE_BLOCK":
-                # State 2: Inside code block - only look for closing marker
-                if code_block_end.match(line):
-                    # Found end of code block - process it
-                    if current_content_lines and current_filename:
-                        code_content = '\n'.join(current_content_lines)
+                # State 2: Inside code block - handle nesting
+                code_match = code_block_pattern.match(line)
 
-                        # Determine if this is a file path or section header
-                        is_file = is_likely_filepath(current_filename)
+                if code_match:
+                    # This is a ``` line
+                    lang_or_empty = code_match.group(1).strip()
 
-                        # Only add if not duplicate
-                        if not is_duplicate_content(code_content, self.code_blocks):
-                            block = CodeBlock(
-                                language=current_language,
-                                path=current_filename if is_file else None,
-                                content=code_content,
-                                line_count=len(current_content_lines),
-                                is_artifact=not is_file
-                            )
-                            self.code_blocks.append(block)
+                    if lang_or_empty:
+                        # This starts a new nested code block
+                        nesting_level += 1
+                        current_content_lines.append(line)
+                    else:
+                        # This ends a code block
+                        nesting_level -= 1
 
-                    # Reset state
-                    state = "LOOKING_FOR_HEADER"
-                    current_filename = None
-                    current_language = None
-                    current_content_lines = []
+                        if nesting_level == 0:
+                            # We've reached the end of the main code block
+                            if current_content_lines and current_filename:
+                                code_content = '\n'.join(current_content_lines)
+
+                                # Determine if this is a file path or section header
+                                is_file = is_likely_filepath(current_filename)
+
+                                # Only add if not duplicate
+                                if not is_duplicate_content(code_content, self.code_blocks):
+                                    block = CodeBlock(
+                                        language=current_language,
+                                        path=current_filename if is_file else None,
+                                        content=code_content,
+                                        line_count=len(current_content_lines),
+                                        is_artifact=not is_file
+                                    )
+                                    self.code_blocks.append(block)
+
+                            # Reset state
+                            state = "LOOKING_FOR_HEADER"
+                            current_filename = None
+                            current_language = None
+                            current_content_lines = []
+                        else:
+                            # This closes a nested block, add it to content
+                            current_content_lines.append(line)
                 else:
-                    # Inside code block: collect all content (including triple quotes!)
+                    # Regular content line inside code block
                     current_content_lines.append(line)
 
     def _extract_inline_style_blocks(self, content: str) -> None:
         """Extract code blocks with inline file paths (```python filename.py)."""
-        # Pattern for markdown code blocks with optional file paths
+        # This method would need similar nesting logic if used
+        # For now, keeping the original implementation
         pattern = r'```(\w+)(?:\s+(.+?))?\n(.*?)```'
         matches = re.finditer(pattern, content, re.DOTALL)
 
