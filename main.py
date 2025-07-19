@@ -55,7 +55,14 @@ def main():
 
     # Step 2: Analyze content
     print("\n🔍 Analyzing content...")
-    analyzer.extract_code_blocks(content)
+
+    # Ask if user wants debug mode for troubleshooting
+    debug_mode = False
+    if len(content) > 5000:  # Ask for files > 5KB
+        debug_choice = input("Enable debug mode to see parsing details? (y/n): ").strip().lower()
+        debug_mode = debug_choice == 'y'
+
+    analyzer.extract_code_blocks(content, debug=debug_mode)
     analyzer.analyze_structure()
 
     if not analyzer.code_blocks:

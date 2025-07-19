@@ -23,9 +23,61 @@ class CodeAnalyzer:
         self.code_blocks: List[CodeBlock] = []
         self.folder_structure: Dict[str, List[str]] = defaultdict(list)
 
-    def extract_code_blocks(self, content: str) -> None:
-        """Extract code blocks from the content."""
+    def debug_extraction(self, content: str, verbose: bool = False) -> None:
+        """Debug the extraction process using state machine approach."""
+        normalized_content = normalize_content(content)
+        lines = normalized_content.split('\n')
+
+        header_pattern = re.compile(r'^## (.+)')
+        code_block_start = re.compile(r'^```(.*)$')
+        code_block_end = re.compile(r'^```\s*$')
+
+        print("🔍 DEBUG: State Machine Extraction")
+        print("-" * 50)
+
+        state = "LOOKING_FOR_HEADER"
+        current_filename = None
+
+        for i, line in enumerate(lines):
+            line_num = i + 1
+
+            # Show state changes and important lines
+            if state == "LOOKING_FOR_HEADER":
+                header_match = header_pattern.match(line)
+                code_start_match = code_block_start.match(line)
+
+                if header_match:
+                    current_filename = header_match.group(1).strip()
+                    print(f"Line {line_num:3d}: {line}")
+                    print(f"         -> STATE: Found header '{current_filename}'")
+                elif current_filename and code_start_match and not code_block_end.match(line):
+                    state = "IN_CODE_BLOCK"
+                    lang = code_start_match.group(1).strip() if code_start_match.group(1) else 'text'
+                    print(f"Line {line_num:3d}: {line}")
+                    print(f"         -> STATE: Entering code block (language: {lang})")
+                elif verbose:
+                    print(f"Line {line_num:3d}: {line}")
+
+            elif state == "IN_CODE_BLOCK":
+                if code_block_end.match(line):
+                    state = "LOOKING_FOR_HEADER"
+                    print(f"Line {line_num:3d}: {line}")
+                    print(f"         -> STATE: Exiting code block, processing '{current_filename}'")
+                    current_filename = None
+                elif verbose or line.strip().startswith('"""'):
+                    print(f"Line {line_num:3d}: {line}")
+                    if line.strip().startswith('"""'):
+                        print(f"         -> CONTENT: Triple quote (correctly ignored)")
+
+        print("-" * 50)
+
+    def extract_code_blocks(self, content: str, debug: bool = False) -> None:
+        """Extract code blocks from the content using state machine approach."""
         self.code_blocks.clear()
+
+        # Debug extraction if requested
+        if debug:
+            self.debug_extraction(content)
 
         # Normalize line endings
         normalized_content = normalize_content(content)
@@ -34,65 +86,77 @@ class CodeAnalyzer:
         self._extract_header_style_blocks(normalized_content)
 
         # Method 2: Try traditional inline file path pattern (```python filename.py)
-        self._extract_inline_style_blocks(normalized_content)
+        # self._extract_inline_style_blocks(normalized_content)
 
     def _extract_header_style_blocks(self, content: str) -> None:
-        """Extract code blocks that follow markdown headers (## filename)."""
+        """Extract code blocks that follow markdown headers using state machine approach."""
         lines = content.split('\n')
 
+        # Regex patterns
         header_pattern = re.compile(r'^## (.+)')
-        code_block_start = re.compile(r'^```(\w+)?')
+        code_block_start = re.compile(r'^```(.*)$')
         code_block_end = re.compile(r'^```\s*$')
 
-        i = 0
-        while i < len(lines):
-            line = lines[i]
+        # State machine variables
+        state = "LOOKING_FOR_HEADER"  # States: LOOKING_FOR_HEADER, IN_CODE_BLOCK
+        current_filename = None
+        current_language = None
+        current_content_lines = []
 
-            # Look for header
-            header_match = header_pattern.match(line)
-            if header_match:
-                potential_file = header_match.group(1).strip()
+        for i, line in enumerate(lines):
+            if state == "LOOKING_FOR_HEADER":
+                # State 1: Looking for headers
+                header_match = header_pattern.match(line)
+                if header_match:
+                    current_filename = header_match.group(1).strip()
+                    # Don't change state yet, wait for code block start
+                    continue
 
-                # Look for code block start in next few lines
-                j = i + 1
-                while j < len(lines) and j < i + 5:  # Look ahead max 5 lines
-                    code_start_match = code_block_start.match(lines[j])
-                    if code_start_match:
-                        # Found code block, extract content
-                        language = code_start_match.group(1) or 'text'
-                        content_lines = []
+                # Check for code block start (only if we have a filename)
+                if current_filename:
+                    code_start_match = code_block_start.match(line)
+                    if code_start_match and not code_block_end.match(line):
+                        # Extract language
+                        lang_and_extra = code_start_match.group(1).strip() if code_start_match.group(1) else ''
+                        if lang_and_extra:
+                            current_language = lang_and_extra.split()[0]
+                        else:
+                            current_language = 'text'
 
-                        k = j + 1
-                        while k < len(lines):
-                            if code_block_end.match(lines[k]):
-                                break
-                            content_lines.append(lines[k])
-                            k += 1
+                        # Change to code block state
+                        state = "IN_CODE_BLOCK"
+                        current_content_lines = []
+                        continue
 
-                        if content_lines:  # Only add if we have content
-                            code_content = '\n'.join(content_lines)
+            elif state == "IN_CODE_BLOCK":
+                # State 2: Inside code block - only look for closing marker
+                if code_block_end.match(line):
+                    # Found end of code block - process it
+                    if current_content_lines and current_filename:
+                        code_content = '\n'.join(current_content_lines)
 
-                            # Determine if this is a file path or just a section header
-                            is_file = is_likely_filepath(potential_file)
+                        # Determine if this is a file path or section header
+                        is_file = is_likely_filepath(current_filename)
 
-                            # Only add if not duplicate
-                            if not is_duplicate_content(code_content, self.code_blocks):
-                                block = CodeBlock(
-                                    language=language,
-                                    path=potential_file if is_file else None,
-                                    content=code_content,
-                                    line_count=len(content_lines),
-                                    is_artifact=not is_file
-                                )
-                                self.code_blocks.append(block)
+                        # Only add if not duplicate
+                        if not is_duplicate_content(code_content, self.code_blocks):
+                            block = CodeBlock(
+                                language=current_language,
+                                path=current_filename if is_file else None,
+                                content=code_content,
+                                line_count=len(current_content_lines),
+                                is_artifact=not is_file
+                            )
+                            self.code_blocks.append(block)
 
-                        i = k  # Skip to end of code block
-                        break
-                    j += 1
+                    # Reset state
+                    state = "LOOKING_FOR_HEADER"
+                    current_filename = None
+                    current_language = None
+                    current_content_lines = []
                 else:
-                    i += 1
-            else:
-                i += 1
+                    # Inside code block: collect all content (including triple quotes!)
+                    current_content_lines.append(line)
 
     def _extract_inline_style_blocks(self, content: str) -> None:
         """Extract code blocks with inline file paths (```python filename.py)."""
@@ -176,7 +240,7 @@ class CodeAnalyzer:
         )
 
     def display_analysis(self) -> None:
-        """Display analysis results."""
+        """Display analysis results with line counts."""
         stats = self.get_statistics()
 
         print("\n" + "="*60)
@@ -192,16 +256,30 @@ class CodeAnalyzer:
         for folder, files in self.folder_structure.items():
             print(f"   📁 {folder}/")
             for file in files:
-                print(f"      📄 {file}")
+                # Find the corresponding block to get line count
+                line_count = 0
+                for block in self.code_blocks:
+                    if block.path and block.path.endswith(file):
+                        line_count = block.line_count
+                        break
+                print(f"      📄 {file} ({line_count} lines)")
 
         print(f"\n💻 LANGUAGES:")
         for lang, count in stats.languages.items():
-            print(f"   {lang}: {count} files")
+            # Calculate total lines for this language
+            lang_lines = sum(block.line_count for block in self.code_blocks if block.language == lang)
+            print(f"   {lang}: {count} files ({lang_lines} lines)")
 
         if stats.artifacts:
             print(f"\n🎨 ARTIFACTS:")
-            for artifact in stats.artifacts:
-                print(f"   ✨ {artifact}")
+            for i, artifact in enumerate(stats.artifacts):
+                # Find line count for this artifact
+                artifact_blocks = [b for b in self.code_blocks if b.is_artifact or not b.path]
+                if i < len(artifact_blocks):
+                    line_count = artifact_blocks[i].line_count
+                    print(f"   ✨ {artifact} ({line_count} lines)")
+                else:
+                    print(f"   ✨ {artifact}")
 
         print("\n" + "="*60)
 
